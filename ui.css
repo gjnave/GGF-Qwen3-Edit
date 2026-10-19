@@ -18,7 +18,8 @@ body, .gradio-container { background:var(--ggf-bg)!important; color:var(--ggf-in
 #ggf-generate button:disabled, #ggf-generate[disabled] { background:#334155!important; color:#b0bfd2!important; cursor:not-allowed!important; }
 #ggf-status { background:#10243a; border:1px solid #315678; border-left:4px solid var(--ggf-gold); border-radius:10px; padding:9px 14px; min-height:40px; }
 #ggf-status progress { width:150px; height:10px; margin-right:8px; accent-color:var(--ggf-gold); }
-#ggf-phone-status, #ggf-phone-status p, #ggf-phone-status a { color:var(--ggf-gold)!important; font-weight:700!important; }
+#ggf-phone-status, #ggf-phone-status p { color:var(--ggf-ink)!important; }
+#ggf-phone-status a { color:var(--ggf-gold)!important; font-weight:700!important; }
 .gradio-container textarea, .gradio-container input { background:#091425!important; color:var(--ggf-ink)!important; caret-color:var(--ggf-gold); font-size:16px!important; }
 .gradio-container textarea::placeholder, .gradio-container input::placeholder { color:var(--ggf-muted)!important; }
 .gradio-container select, .gradio-container option, .gradio-container [role="option"] { background:#111c2f!important; color:var(--ggf-ink)!important; }
