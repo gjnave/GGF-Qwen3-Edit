@@ -22,7 +22,8 @@ import gradio as gr
 from PIL import Image, ImageOps
 
 from access import MODES, load as load_access, save as save_access, verify as verify_access
-from model_store import APP, DEFAULT_REPO, MODEL_DIR, installed_receipt, verify as verify_model
+from model_store import (APP, DEFAULT_REPO, MODEL_DIR, QUANTS, installed_receipt,
+                         save_quant, selected_quant, verify as verify_model)
 
 ASSETS = APP / "assets"
 OUTPUTS = APP / "outputs"
@@ -51,8 +52,8 @@ CTRL_ENTER = """(token) => {
 }"""
 
 
-def model_status() -> str:
-    ready, note = verify_model()
+def model_status(quant: str | None = None) -> str:
+    ready, note = verify_model(quant)
     return (f"<div class='model-ready'>✓ {note}</div>" if ready else
             f"<div class='model-missing'>Model download required on this PC. {note}</div>")
 
@@ -105,8 +106,8 @@ def save_workspace_image(token: str, slot: int, source: str | None) -> None:
 def save_workspace_controls(token: str, prompt: str, negative: str, steps: int,
                             cfg: float, seed: int) -> None:
     _update_workspace(token, prompt=prompt or "", negative=negative or "",
-                      steps=int(steps if steps is not None else 40),
-                      cfg=float(cfg if cfg is not None else 4),
+                      steps=int(steps if steps is not None else 20),
+                      cfg=float(cfg if cfg is not None else 2.5),
                       seed=int(seed if seed is not None else -1))
 
 
@@ -122,7 +123,7 @@ def restore_workspace(token: str):
         result = None
     note = "Generation is running on this PC. Reopen the saved result when it finishes." if _busy() else data.get("status", "Ready.")
     return (token, *images, data.get("prompt", ""), data.get("negative", ""),
-            data.get("steps", 40), data.get("cfg", 4), data.get("seed", -1),
+            data.get("steps", 20), data.get("cfg", 2.5), data.get("seed", -1),
             result, html.escape(note), phone_status(),
             gr.update(interactive=not bool(_busy()) and verify_model()[0]),
             gr.update(interactive=not bool(_busy()) and verify_model()[0]))
@@ -230,7 +231,8 @@ def generate(first, second, third, prompt, negative, steps, cfg, seed, token, pr
             raise ValueError("Tell the app what should change in the image.")
         if not first:
             raise ValueError("Upload the image you want to edit.")
-        ready, note = verify_model()
+        quant = selected_quant()
+        ready, note = verify_model(quant)
         if not ready:
             raise ValueError(f"{note} Go to Settings and install models first.")
         if _busy():
@@ -249,7 +251,8 @@ def generate(first, second, third, prompt, negative, steps, cfg, seed, token, pr
         request = {"images": images, "prompt": prompt.strip(), "negative_prompt": negative,
                    "steps": 12 if preview else int(steps), "cfg": float(cfg),
                    "seed": int(seed if seed is not None else -1),
-                   "megapixels": 0.45 if preview else 1.0, "output": str(result)}
+                   "megapixels": 0.45 if preview else 1.0, "output": str(result),
+                   "quant": quant}
         request_path = job / "request.json"
         request_path.write_text(json.dumps(request, indent=2), encoding="utf-8")
         worker_log = job / "worker.log"
@@ -314,32 +317,33 @@ def refresh_activity(token: str):
     return html.escape(data.get("status", "Ready.")), gr.update(), gr.update(interactive=verify_model()[0]), gr.update(interactive=verify_model()[0])
 
 
-def install_models(url):
-    yield model_status(), "⏳ Checking model source…", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+def install_models(url, quant):
+    yield model_status(quant), "⏳ Checking model source…", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
     try:
         if _busy():
             raise RuntimeError(f"This PC is already running {_busy()}.")
+        save_quant(quant)
         job = _job_dir()
-        process = _start([sys.executable, "-u", str(APP / "download_models.py"), url],
+        process = _start([sys.executable, "-u", str(APP / "download_models.py"), url, quant],
                          "model download", job / "download.log")
         last = "Downloading to this PC…"
         for message in _lines(process, job / "download.log"):
             if message is None:
                 size = sum(p.stat().st_size for p in MODEL_DIR.rglob("*") if p.is_file()) / 1e9 if MODEL_DIR.exists() else 0
-                yield model_status(), f"⏳ {last} · about {size:.1f} GB now in the model folder.", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+                yield model_status(quant), f"⏳ {last} · about {size:.1f} GB now in the model folder.", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
             elif "error" in message:
                 last = message["error"]
-                yield model_status(), f"Download stopped: {last}", gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False)
+                yield model_status(quant), f"Download stopped: {last}", gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False)
             elif "status" in message:
                 last = message["status"]
-                yield model_status(), f"⏳ {last}", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+                yield model_status(quant), f"⏳ {last}", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
         process.wait()
         if process.returncode == 0:
-            yield model_status(), "✓ Model download complete and files verified. You can now create an image.", gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=True)
+            yield model_status(quant), "✓ Model download complete and files verified. You can now create an image.", gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=True)
         else:
-            yield model_status(), f"Download incomplete. {last} Partial files remain; press Install again to resume.", gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False)
+            yield model_status(quant), f"Download incomplete. {last} Partial files remain; press Install again to resume.", gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False)
     except Exception as error:
-        yield model_status(), f"Download could not start: {error}", gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False)
+        yield model_status(quant), f"Download could not start: {error}", gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False)
 
 
 def phone_status() -> str:
@@ -394,7 +398,7 @@ def build_ui():
     missing = not verify_model()[0]
     settings = load_access()
     receipt = installed_receipt()
-    saved_source = f"{receipt['endpoint']}/{receipt['repo']}" if receipt else f"https://huggingface.co/{DEFAULT_REPO}"
+    saved_source = f"https://huggingface.co/{receipt['files'][0]['repo']}" if receipt else f"https://huggingface.co/{DEFAULT_REPO}"
     default_mode = next(label for label, mode in MODES.items() if mode == settings["mode"])
     with gr.Blocks(title="GGF Qwen3 Edit") as demo:
         browser_token = gr.BrowserState("", storage_key="ggf-qwen3-edit-workspace-v1",
@@ -415,8 +419,8 @@ def build_ui():
                     prompt = gr.Textbox(label="What should change?", lines=4, placeholder="Example: Keep the person the same, but change the jacket to red leather.")
                     with gr.Accordion("More control", open=False):
                         negative = gr.Textbox(label="Things to avoid · optional", value="")
-                        steps = gr.Slider(label="Generation steps", minimum=10, maximum=80, value=40, step=1)
-                        cfg = gr.Slider(label="Prompt guidance", minimum=1, maximum=8, value=4, step=0.5)
+                        steps = gr.Slider(label="Generation steps", minimum=4, maximum=80, value=20, step=1)
+                        cfg = gr.Slider(label="Prompt guidance", minimum=1, maximum=8, value=2.5, step=0.5)
                         seed = gr.Number(label="Seed · -1 chooses a new one", value=-1, precision=0)
                     preview_button = gr.Button("Quick preview · smaller image, fewer steps", variant="secondary", interactive=not missing)
                     generate_button = gr.Button("Generate edit · Ctrl+Enter", variant="primary", elem_id="ggf-generate", interactive=not missing)
@@ -426,12 +430,12 @@ def build_ui():
                     latest = gr.Button("Show latest saved image on this PC")
                     activity_timer = gr.Timer(4)
                 with gr.Tab("Settings", id="settings"):
-                    gr.Markdown("### First, download the model to this PC")
+                    gr.Markdown("### Choose a GGUF model and download it to this PC")
                     with gr.Column(visible=missing, elem_id="ggf-liz-guide") as guide:
                         with gr.Column(visible=True) as step_one:
                             gr.Markdown("### LiZ · getting started")
                             liz_media("liz-qwen-download.mp4")
-                            gr.Markdown("**First download the Qwen Image Edit model to your PC.** A phone can control the app, but the model stays and runs on the PC.")
+                            gr.Markdown("**First choose a quant and download it to your PC.** A phone can control the app, but the model stays and runs on the PC.")
                             next_button = gr.Button("Next · make your first edit", variant="primary")
                             skip = gr.Button("Skip introduction")
                         with gr.Column(visible=False) as step_two:
@@ -440,10 +444,13 @@ def build_ui():
                             done = gr.Button("Show model download", variant="primary")
                     replay = gr.Button("Meet LiZ · replay the guide", visible=not missing)
                     model_note = gr.HTML(model_status(), elem_id="ggf-model-installed")
-                    url = gr.Textbox(label="Model source URL · change only if you use another Hugging Face repository", value=saved_source)
-                    gr.Markdown("The default is the official Qwen Image Edit 2509 model. This large download stays on the PC, resumes after interruption, and is checked before the app marks it installed. Other repository URLs must contain the same complete Diffusers pipeline structure.")
-                    install = gr.Button("Install / resume model download on this PC", variant="primary")
-                    install_status = gr.Markdown("Choose Install to begin. The first download may need roughly 60 GB plus working space.")
+                    quant = gr.Dropdown(label="GGUF quantization · choose quality and download size",
+                                        choices=list(QUANTS), value=selected_quant(), interactive=True)
+                    quant_note = gr.Markdown("Q4_K_M is the default. Smaller quants use less disk and memory; larger quants may retain more detail. The text encoder and VAE are shared between your installed quants.")
+                    url = gr.Textbox(label="GGUF source URL · optional alternative Hugging Face repository", value=saved_source)
+                    gr.Markdown("The default GGUF comes from QuantStack. An alternative repository must provide the same Qwen-Image-Edit-2509 quant filenames. The app also downloads the text encoder and VAE from Comfy-Org. Files stay in this app's own model folder; your separate ComfyUI installation is not used.")
+                    install = gr.Button("Install / resume selected GGUF and support models", variant="primary")
+                    install_status = gr.Markdown("Choose a quant, then press Install. Approximate first download: 16–30 GB depending on quant, plus working space.")
                     stop_download = gr.Button("Stop current download · keep partial files")
                     refresh = gr.Button("Refresh installed status")
                     gr.Markdown("### Use it from your phone")
@@ -457,11 +464,11 @@ def build_ui():
                     gr.Markdown("### App controls")
                     gr.Markdown("For app updates, close this server and run **UPDATE.bat** beside RUN.bat. Your models, outputs, and phone settings stay on this PC.")
                     release = gr.Button("Release models / free GPU memory")
-                    release_note = gr.Markdown("The model runs in a separate worker and is released after each job.")
+                    release_note = gr.Markdown("The app-local Comfy worker exits after each job, releasing GPU memory.")
                     shutdown = gr.Button("Stop server", variant="secondary")
                     confirm = gr.Button("Confirm: stop this app; restart it on the PC later", visible=False)
                     shutdown_note = gr.Markdown()
-            gr.HTML("<div id='ggf-footer'>Powered by Qwen Image Edit 2509 · Get Going Fast makes the local workflow easier.</div>")
+            gr.HTML("<div id='ggf-footer'>Qwen Image Edit 2509 · GGUF · app-local Comfy core · Get Going Fast.</div>")
 
         for slot, component in enumerate((first, second, third)):
             component.upload(lambda token, image, slot=slot: save_workspace_image(token, slot, image),
@@ -479,8 +486,11 @@ def build_ui():
         latest.click(latest_output, inputs=[browser_token], outputs=[output, status], queue=False)
         activity_timer.tick(refresh_activity, inputs=[browser_token],
                             outputs=[status, output, generate_button, preview_button], queue=False)
-        install.click(install_models, inputs=[url], outputs=[model_note, install_status, install, generate_button, preview_button], show_progress="minimal").then(
+        install.click(install_models, inputs=[url, quant], outputs=[model_note, install_status, install, generate_button, preview_button], show_progress="minimal").then(
             model_status, outputs=[header_model_note], queue=False)
+        quant.change(lambda choice: (save_quant(choice), model_status(choice), model_status(choice),
+                                     gr.update(interactive=verify_model(choice)[0]), gr.update(interactive=verify_model(choice)[0])),
+                     inputs=[quant], outputs=[quant_note, model_note, header_model_note, generate_button, preview_button], queue=False)
         stop_download.click(_stop, outputs=[install_status], queue=False)
         refresh.click(lambda: (model_status(), model_status(), gr.update(interactive=verify_model()[0]), gr.update(interactive=verify_model()[0])),
                       outputs=[model_note, header_model_note, generate_button, preview_button], queue=False)

@@ -15,7 +15,7 @@ def report(message):
 
 if __name__ == "__main__":
     try:
-        report(download(sys.argv[1], report))
+        report(download(sys.argv[1], sys.argv[2], report))
         print(json.dumps({"complete": True}), flush=True)
     except Exception as exc:
         detail = str(exc)
