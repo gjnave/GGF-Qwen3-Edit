@@ -37,6 +37,7 @@ ACTIVE_KIND = ""
 ACTIVE_LINK = ""
 ACTIVE_LOCAL = ""
 ACTIVE_ACCESS = "local"
+ACTIVE_PHONE_ERROR = ""
 
 CTRL_ENTER = """(token) => {
   if (!window.__ggfQwenShortcut) {
@@ -347,7 +348,15 @@ def install_models(url, quant):
 
 
 def phone_status() -> str:
-    return f"Local PC: {ACTIVE_LOCAL or 'starting'} · Phone: {ACTIVE_LINK or 'off'}"
+    if ACTIVE_LINK:
+        phone = ACTIVE_LINK
+    elif ACTIVE_PHONE_ERROR:
+        phone = f"Could not start phone access: {html.escape(ACTIVE_PHONE_ERROR)}. Check the PC console, then restart RUN.bat."
+    elif ACTIVE_ACCESS != "local":
+        phone = "Starting phone access… The link will appear here automatically."
+    else:
+        phone = "off"
+    return f"Local PC: {ACTIVE_LOCAL or 'starting'} · Phone: {phone}"
 
 
 def phone_url(local_url: str) -> str:
@@ -454,13 +463,14 @@ def build_ui():
                     stop_download = gr.Button("Stop current download · keep partial files")
                     refresh = gr.Button("Refresh installed status")
                     gr.Markdown("### Use it from your phone")
-                    gr.Markdown("Your PC generates the image and must stay on. Choose Wi-Fi for your own network, or a temporary link for access elsewhere. Restart the app after saving.")
+                    gr.Markdown("Your PC generates the image and must stay on. Choose Wi-Fi for your own network, or a temporary link for access elsewhere. Restart the app after saving; the link below will appear automatically when it is ready.")
                     mode = gr.Dropdown(label="Phone access", choices=list(MODES), value=default_mode)
                     username = gr.Textbox(label="Remote username · optional when password is blank", value=settings["username"])
                     password = gr.Textbox(label="Remote password · optional", type="password")
                     save_phone = gr.Button("Save phone settings")
-                    access_note = gr.Markdown(phone_status())
+                    access_note = gr.Markdown(phone_status(), elem_id="ggf-phone-status")
                     save_note = gr.Markdown()
+                    phone_timer = gr.Timer(3)
                     gr.Markdown("### App controls")
                     gr.Markdown("For app updates, close this server and run **UPDATE.bat** beside RUN.bat. Your models, outputs, and phone settings stay on this PC.")
                     release = gr.Button("Release models / free GPU memory")
@@ -500,6 +510,7 @@ def build_ui():
         replay.click(lambda: (gr.update(visible=True), gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)),
                      outputs=[guide, step_one, step_two, replay], queue=False)
         save_phone.click(lambda m, u, p: save_access(m, u, p), inputs=[mode, username, password], outputs=[save_note], queue=False)
+        phone_timer.tick(phone_status, outputs=[access_note], queue=False)
         release.click(lambda: "The worker releases GPU memory after every job." if not _busy() else "Stop the current job first.",
                       outputs=[release_note], queue=False)
         shutdown.click(lambda: gr.update(visible=True), outputs=[confirm], queue=False)
@@ -524,7 +535,7 @@ def launch_one(demo, port, **kwargs):
 
 
 def main():
-    global ACTIVE_ACCESS, ACTIVE_LINK, ACTIVE_LOCAL
+    global ACTIVE_ACCESS, ACTIVE_LINK, ACTIVE_LOCAL, ACTIVE_PHONE_ERROR
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--port", type=int, default=7874)
@@ -533,6 +544,7 @@ def main():
     JOBS.mkdir(exist_ok=True)
     settings = load_access()
     ACTIVE_ACCESS = settings["mode"]
+    ACTIVE_PHONE_ERROR = ""
     local = build_ui().queue(default_concurrency_limit=1)
     _, ACTIVE_LOCAL, _ = launch_one(local, args.port, server_name="127.0.0.1", share=False,
                                     auth=None, inbrowser=not args.no_browser)
@@ -547,6 +559,7 @@ def main():
             ACTIVE_LINK = public or (phone_url(remote_local) if ACTIVE_ACCESS == "lan" else remote_local)
             print(f"Phone access: {ACTIVE_LINK}", flush=True)
         except Exception as error:
+            ACTIVE_PHONE_ERROR = str(error)
             print(f"Phone access failed: {error}. Local app remains available.", flush=True)
     try:
         while True:
