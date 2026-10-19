@@ -15,6 +15,8 @@ The [Get Going Fast Qwen3 Edit page](https://getgoingfast.pro/tools/qwen3edit/) 
 5. Run `.venv\Scripts\python.exe app.py`. In Settings, download the default official model to this PC. The first model download is large (roughly 60 GB) and can be resumed.
 6. To use a phone, choose My Wi-Fi or Temporary phone link under Settings, save, then restart the app. The PC must remain on.
 
+The member package includes `UPDATE.bat`; close the app before running it. Updates download the current source revision from Codeberg or GitHub, back up existing source files, and preserve local models, outputs, and settings.
+
 Use a current NVIDIA driver. The app runs image inference in a one-shot worker so the model is released from GPU memory after each job. `outputs/`, `jobs/`, `.venv/`, and `models/` are local data, not source files. If a phone disconnects, use **Show latest saved image on this PC** to reopen a completed result.
 
 The original ComfyUI model manager is distributed separately with the member package in an optional `ComfyUI` folder. It is not required for this standalone app.

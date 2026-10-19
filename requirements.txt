@@ -6,3 +6,4 @@ huggingface_hub>=1.2,<2
 safetensors>=0.6,<1
 pillow>=11,<13
 sentencepiece>=0.2,<1
+psutil>=7,<8

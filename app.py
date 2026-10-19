@@ -230,16 +230,28 @@ def phone_status() -> str:
 
 def phone_url(local_url: str) -> str:
     port = urlparse(local_url).port
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect(("1.1.1.1", 80))
-            return f"http://{probe.getsockname()[0]}:{port}/"
-    except OSError:
-        for candidate in socket.gethostbyname_ex(socket.gethostname())[2]:
-            address = ipaddress.ip_address(candidate)
-            if address.is_private and not address.is_loopback and not address.is_link_local:
-                return f"http://{candidate}:{port}/"
-        return f"Find this PC's Wi-Fi IP address and open port {port} on your phone."
+    import psutil
+    candidates = []
+    virtual_names = ("vpn", "tailscale", "veth", "virtual", "hyper-v", "wsl", "docker", "vmware", "loopback")
+    interface_status = psutil.net_if_stats()
+    for name, addresses in psutil.net_if_addrs().items():
+        if any(word in name.lower() for word in virtual_names):
+            continue
+        if name not in interface_status or not interface_status[name].isup:
+            continue
+        for entry in addresses:
+            if entry.family != socket.AF_INET or not entry.netmask:
+                continue
+            address = ipaddress.ip_address(entry.address)
+            if not address.is_private or address.is_loopback or address.is_link_local:
+                continue
+            if ipaddress.ip_network(f"{entry.address}/{entry.netmask}", strict=False).prefixlen >= 31:
+                continue
+            rank = 0 if name.lower().startswith(("wi-fi", "wifi", "ethernet")) else 1
+            candidates.append((rank, name, entry.address))
+    if candidates:
+        return f"http://{sorted(candidates)[0][2]}:{port}/"
+    return f"No local Wi-Fi/Ethernet address found. Find this PC's LAN IP and open port {port} on your phone."
 
 
 def liz_media(name: str):

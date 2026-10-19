@@ -6,5 +6,6 @@
 /logs/
 /access.json
 /__pycache__/
+/update-backups/
 /.gradio/
 *.pyc
