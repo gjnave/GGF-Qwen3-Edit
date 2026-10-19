@@ -334,6 +334,7 @@ def build_ui():
                     access_note = gr.Markdown(phone_status())
                     save_note = gr.Markdown()
                     gr.Markdown("### App controls")
+                    gr.Markdown("For app updates, close this server and run **UPDATE.bat** beside RUN.bat. Your models, outputs, and phone settings stay on this PC.")
                     release = gr.Button("Release models / free GPU memory")
                     release_note = gr.Markdown("The model runs in a separate worker and is released after each job.")
                     shutdown = gr.Button("Stop server", variant="secondary")
@@ -347,7 +348,8 @@ def build_ui():
                              outputs=[output, status, generate_button, preview_button], show_progress="minimal")
         stop.click(_stop, outputs=[status], queue=False)
         latest.click(latest_output, outputs=[output, status], queue=False)
-        install.click(install_models, inputs=[url], outputs=[model_note, install_status, install, generate_button, preview_button], show_progress="minimal")
+        install.click(install_models, inputs=[url], outputs=[model_note, install_status, install, generate_button, preview_button], show_progress="minimal").then(
+            model_status, outputs=[header_model_note], queue=False)
         stop_download.click(_stop, outputs=[install_status], queue=False)
         refresh.click(lambda: (model_status(), model_status(), gr.update(interactive=verify_model()[0]), gr.update(interactive=verify_model()[0])),
                       outputs=[model_note, header_model_note, generate_button, preview_button], queue=False)
