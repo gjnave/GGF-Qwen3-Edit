@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import queue
+import re
 import socket
 import subprocess
 import sys
@@ -26,23 +27,27 @@ from model_store import APP, DEFAULT_REPO, MODEL_DIR, installed_receipt, verify 
 ASSETS = APP / "assets"
 OUTPUTS = APP / "outputs"
 JOBS = APP / "jobs"
+WORKSPACES = JOBS / "workspaces"
 CSS = (APP / "ui.css").read_text(encoding="utf-8")
 ACTIVE_LOCK = threading.Lock()
+WORKSPACE_LOCK = threading.Lock()
 ACTIVE_PROCESS: subprocess.Popen | None = None
 ACTIVE_KIND = ""
 ACTIVE_LINK = ""
 ACTIVE_LOCAL = ""
 ACTIVE_ACCESS = "local"
 
-CTRL_ENTER = """() => {
-  if (window.__ggfQwenShortcut) return;
-  window.__ggfQwenShortcut = true;
-  document.addEventListener('keydown', event => {
-    if (!event.ctrlKey || event.key !== 'Enter' || event.repeat || event.isComposing) return;
-    const button = document.querySelector('#ggf-generate button, button#ggf-generate');
-    if (!button || button.disabled || button.offsetParent === null) return;
-    event.preventDefault(); button.click();
-  });
+CTRL_ENTER = """(token) => {
+  if (!window.__ggfQwenShortcut) {
+    window.__ggfQwenShortcut = true;
+    document.addEventListener('keydown', event => {
+      if (!event.ctrlKey || event.key !== 'Enter' || event.repeat || event.isComposing) return;
+      const button = document.querySelector('#ggf-generate button, button#ggf-generate');
+      if (!button || button.disabled || button.offsetParent === null) return;
+      event.preventDefault(); button.click();
+    });
+  }
+  return token;
 }"""
 
 
@@ -50,6 +55,77 @@ def model_status() -> str:
     ready, note = verify_model()
     return (f"<div class='model-ready'>✓ {note}</div>" if ready else
             f"<div class='model-missing'>Model download required on this PC. {note}</div>")
+
+
+def _workspace(token: str) -> Path | None:
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+        return None
+    return WORKSPACES / token
+
+
+def _workspace_data(token: str) -> dict:
+    path = _workspace(token)
+    if path is None or not (path / "state.json").is_file():
+        return {}
+    try:
+        return json.loads((path / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _update_workspace(token: str, **changes) -> None:
+    path = _workspace(token)
+    if path is None:
+        return
+    with WORKSPACE_LOCK:
+        path.mkdir(parents=True, exist_ok=True)
+        data = _workspace_data(token)
+        data.update(changes)
+        (path / "state.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def save_workspace_image(token: str, slot: int, source: str | None) -> None:
+    path = _workspace(token)
+    if path is None or slot not in (0, 1, 2):
+        return
+    data = _workspace_data(token)
+    images = (data.get("images") or [None, None, None])[:3]
+    images += [None] * (3 - len(images))
+    if source:
+        path.mkdir(parents=True, exist_ok=True)
+        destination = path / f"image-{slot + 1}-{uuid.uuid4().hex[:8]}.png"
+        with Image.open(source) as opened:
+            ImageOps.exif_transpose(opened).convert("RGB").save(destination)
+        images[slot] = str(destination)
+    else:
+        images[slot] = None
+    _update_workspace(token, images=images)
+
+
+def save_workspace_controls(token: str, prompt: str, negative: str, steps: int,
+                            cfg: float, seed: int) -> None:
+    _update_workspace(token, prompt=prompt or "", negative=negative or "",
+                      steps=int(steps if steps is not None else 40),
+                      cfg=float(cfg if cfg is not None else 4),
+                      seed=int(seed if seed is not None else -1))
+
+
+def restore_workspace(token: str):
+    if _workspace(token) is None:
+        token = uuid.uuid4().hex
+    data = _workspace_data(token)
+    images = (data.get("images") or [None, None, None])[:3]
+    images += [None] * (3 - len(images))
+    images = [image if image and Path(image).is_file() else None for image in images]
+    result = data.get("result")
+    if not result or not Path(result).is_file() or not Path(result).resolve().is_relative_to(OUTPUTS.resolve()):
+        result = None
+    note = "Generation is running on this PC. Reopen the saved result when it finishes." if _busy() else data.get("status", "Ready.")
+    return (token, *images, data.get("prompt", ""), data.get("negative", ""),
+            data.get("steps", 40), data.get("cfg", 4), data.get("seed", -1),
+            result, html.escape(note), phone_status(),
+            gr.update(interactive=not bool(_busy()) and verify_model()[0]),
+            gr.update(interactive=not bool(_busy()) and verify_model()[0]))
 
 
 def _claim(process: subprocess.Popen, kind: str) -> bool:
@@ -129,7 +205,25 @@ def _job_dir() -> Path:
     return path
 
 
-def generate(first, second, third, prompt, negative, steps, cfg, seed, preview=False):
+def _watch_generation(token: str, process: subprocess.Popen, result: Path, log: Path) -> None:
+    """Preserve completion even when a phone sleeps or its page disconnects."""
+    process.wait()
+    if process.returncode == 0 and result.is_file():
+        _update_workspace(token, result=str(result), status=f"Generation complete · saved {result.name}")
+        return
+    detail = "Generation stopped. The job log is saved on this PC."
+    if log.is_file():
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+                if "error" in event:
+                    detail = f"Generation stopped: {event['error']}"
+            except ValueError:
+                pass
+    _update_workspace(token, status=detail)
+
+
+def generate(first, second, third, prompt, negative, steps, cfg, seed, token, preview=False):
     yield None, "⏳ Starting generation · checking inputs…", gr.update(interactive=False), gr.update(interactive=False)
     try:
         if not prompt or not prompt.strip():
@@ -153,35 +247,46 @@ def generate(first, second, third, prompt, negative, steps, cfg, seed, preview=F
         label = "PREVIEW-" if preview else ""
         result = OUTPUTS / f"GGF-Qwen3-Edit-{label}{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}.png"
         request = {"images": images, "prompt": prompt.strip(), "negative_prompt": negative,
-                   "steps": 12 if preview else int(steps), "cfg": float(cfg), "seed": int(seed),
+                   "steps": 12 if preview else int(steps), "cfg": float(cfg),
+                   "seed": int(seed if seed is not None else -1),
                    "megapixels": 0.45 if preview else 1.0, "output": str(result)}
         request_path = job / "request.json"
         request_path.write_text(json.dumps(request, indent=2), encoding="utf-8")
+        worker_log = job / "worker.log"
         process = _start([sys.executable, "-u", str(APP / "worker.py"), str(request_path)],
-                         "image generation", job / "worker.log")
+                         "image generation", worker_log)
+        _update_workspace(token, status="Generation running on this PC. The result will stay saved if this page closes.",
+                          started_at=time.time())
+        threading.Thread(target=_watch_generation,
+                         args=(token, process, result, worker_log), daemon=True).start()
         finished = False
         began = time.monotonic()
         stage = "Loading or preparing the model…"
-        for message in _lines(process, job / "worker.log"):
+        for message in _lines(process, worker_log):
             if message is None:
                 elapsed = int(time.monotonic() - began)
                 yield None, f"<progress></progress> ⏳ {html.escape(stage)} · {elapsed}s elapsed", gr.update(interactive=False), gr.update(interactive=False)
             elif "complete" in message:
                 finished = True
+                _update_workspace(token, result=str(result), status=f"Generation complete · saved {result.name}")
                 yield str(result), f"✓ Generation complete · seed {message['seed']} · saved to {result.name}", gr.update(interactive=True), gr.update(interactive=True)
             elif "error" in message:
+                _update_workspace(token, status=f"Generation stopped: {message['error']}")
                 yield None, f"Generation stopped: {html.escape(message['error'])}", gr.update(interactive=True), gr.update(interactive=True)
             elif "status" in message:
                 current = message["status"]
                 stage = current
+                _update_workspace(token, status=current)
                 step = message.get("step")
                 progress = (f"<progress value='{step}' max='{message['total']}'></progress> " if step else
                             "<progress></progress> ")
                 yield None, progress + html.escape(current), gr.update(interactive=False), gr.update(interactive=False)
         process.wait()
         if not finished and process.returncode != 0:
+            _update_workspace(token, status="Generation stopped. Review the job log on this PC.")
             yield None, f"Generation stopped. See {job / 'worker.log'} for details.", gr.update(interactive=True), gr.update(interactive=True)
     except Exception as error:
+        _update_workspace(token, status=f"Could not generate: {error}")
         yield None, f"Could not generate: {html.escape(str(error))}", gr.update(interactive=True), gr.update(interactive=True)
 
 
@@ -189,11 +294,24 @@ def quick_preview(*args):
     yield from generate(*args, preview=True)
 
 
-def latest_output():
-    files = sorted(OUTPUTS.glob("GGF-Qwen3-Edit-*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not files:
-        return None, "No saved output yet."
-    return str(files[0]), f"Loaded saved output: {files[0].name}"
+def latest_output(token: str):
+    saved = _workspace_data(token).get("result")
+    if not saved or not Path(saved).is_file() or not Path(saved).resolve().is_relative_to(OUTPUTS.resolve()):
+        return None, "No saved output for this browser yet."
+    return saved, f"Loaded saved output: {Path(saved).name}"
+
+
+def refresh_activity(token: str):
+    data = _workspace_data(token)
+    busy = _busy()
+    if busy:
+        elapsed = int(max(0, time.time() - data.get("started_at", time.time())))
+        note = data.get("status", "Generation running on this PC.") if busy == "image generation" else f"The PC is busy with {busy}."
+        return f"<progress></progress> ⏳ {html.escape(note)} · {elapsed}s elapsed", gr.update(), gr.update(interactive=False), gr.update(interactive=False)
+    result = data.get("result")
+    if result and Path(result).is_file() and Path(result).resolve().is_relative_to(OUTPUTS.resolve()):
+        return html.escape(data.get("status", "Generation complete.")), result, gr.update(interactive=True), gr.update(interactive=True)
+    return html.escape(data.get("status", "Ready.")), gr.update(), gr.update(interactive=verify_model()[0]), gr.update(interactive=verify_model()[0])
 
 
 def install_models(url):
@@ -279,6 +397,8 @@ def build_ui():
     saved_source = f"{receipt['endpoint']}/{receipt['repo']}" if receipt else f"https://huggingface.co/{DEFAULT_REPO}"
     default_mode = next(label for label, mode in MODES.items() if mode == settings["mode"])
     with gr.Blocks(title="GGF Qwen3 Edit") as demo:
+        browser_token = gr.BrowserState("", storage_key="ggf-qwen3-edit-workspace-v1",
+                                        secret="ggf-qwen3-edit-browser-state-2026")
         with gr.Column(elem_id="ggf-shell"):
             gr.HTML("<div id='ggf-hero'><div class='kicker'>GET GOING FAST · LOCAL AI</div><h1>GGF Qwen3 Edit</h1>"
                     "<p>Change an image with plain words. Add reference images when they help.</p>"
@@ -304,6 +424,7 @@ def build_ui():
                     status = gr.HTML("Ready." if not missing else "Install the model in Settings before generating.", elem_id="ggf-status")
                     output = gr.Image(label="Your edited image", interactive=False, height=520)
                     latest = gr.Button("Show latest saved image on this PC")
+                    activity_timer = gr.Timer(4)
                 with gr.Tab("Settings", id="settings"):
                     gr.Markdown("### First, download the model to this PC")
                     with gr.Column(visible=missing, elem_id="ggf-liz-guide") as guide:
@@ -342,12 +463,22 @@ def build_ui():
                     shutdown_note = gr.Markdown()
             gr.HTML("<div id='ggf-footer'>Powered by Qwen Image Edit 2509 · Get Going Fast makes the local workflow easier.</div>")
 
-        generate_button.click(generate, inputs=[first, second, third, prompt, negative, steps, cfg, seed],
+        for slot, component in enumerate((first, second, third)):
+            component.upload(lambda token, image, slot=slot: save_workspace_image(token, slot, image),
+                             inputs=[browser_token, component], outputs=None, queue=False)
+            component.clear(lambda token, slot=slot: save_workspace_image(token, slot, None),
+                            inputs=[browser_token], outputs=None, queue=False)
+        gr.on([prompt.input, negative.input, steps.input, cfg.input, seed.input],
+              save_workspace_controls, inputs=[browser_token, prompt, negative, steps, cfg, seed],
+              outputs=None, queue=False)
+        generate_button.click(generate, inputs=[first, second, third, prompt, negative, steps, cfg, seed, browser_token],
                               outputs=[output, status, generate_button, preview_button], show_progress="minimal")
-        preview_button.click(quick_preview, inputs=[first, second, third, prompt, negative, steps, cfg, seed],
+        preview_button.click(quick_preview, inputs=[first, second, third, prompt, negative, steps, cfg, seed, browser_token],
                              outputs=[output, status, generate_button, preview_button], show_progress="minimal")
         stop.click(_stop, outputs=[status], queue=False)
-        latest.click(latest_output, outputs=[output, status], queue=False)
+        latest.click(latest_output, inputs=[browser_token], outputs=[output, status], queue=False)
+        activity_timer.tick(refresh_activity, inputs=[browser_token],
+                            outputs=[status, output, generate_button, preview_button], queue=False)
         install.click(install_models, inputs=[url], outputs=[model_note, install_status, install, generate_button, preview_button], show_progress="minimal").then(
             model_status, outputs=[header_model_note], queue=False)
         stop_download.click(_stop, outputs=[install_status], queue=False)
@@ -363,7 +494,10 @@ def build_ui():
                       outputs=[release_note], queue=False)
         shutdown.click(lambda: gr.update(visible=True), outputs=[confirm], queue=False)
         confirm.click(stop_server, outputs=[shutdown_note], queue=False)
-        demo.load(phone_status, outputs=[access_note], queue=False, js=CTRL_ENTER)
+        demo.load(restore_workspace, inputs=[browser_token],
+                  outputs=[browser_token, first, second, third, prompt, negative, steps, cfg, seed,
+                           output, status, access_note, generate_button, preview_button],
+                  queue=False, js=CTRL_ENTER)
     return demo
 
 
@@ -371,7 +505,7 @@ def launch_one(demo, port, **kwargs):
     for candidate in range(port, port + 30):
         try:
             return demo.launch(server_port=candidate, prevent_thread_lock=True, show_error=True,
-                               allowed_paths=[str(OUTPUTS), str(ASSETS)], css=CSS,
+                               allowed_paths=[str(OUTPUTS), str(ASSETS), str(WORKSPACES)], css=CSS,
                                theme=gr.themes.Base(primary_hue="amber", neutral_hue="slate"), **kwargs)
         except OSError as error:
             if "Cannot find empty port" not in str(error) and getattr(error, "winerror", None) != 10048:
