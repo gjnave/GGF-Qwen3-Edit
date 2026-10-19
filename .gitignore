@@ -1,0 +1,10 @@
+/.venv/
+/runtime/
+/models/
+/jobs/
+/outputs/
+/logs/
+/access.json
+/__pycache__/
+/.gradio/
+*.pyc
